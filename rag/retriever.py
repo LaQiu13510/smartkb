@@ -41,6 +41,8 @@ class HybridRetriever:
         vector_weight: float = 0.6,
         bm25_weight: float = 0.4,
         rrf_k: int = 60,
+        enable_query_rewrite: bool = True,
+        enable_rerank: bool = True,
     ):
         """
         Args:
@@ -55,6 +57,8 @@ class HybridRetriever:
         self.vector_weight = vector_weight
         self.bm25_weight = bm25_weight
         self.rrf_k = rrf_k
+        self.enable_query_rewrite = enable_query_rewrite
+        self.enable_rerank = enable_rerank
 
         # BM25 索引 (需要构建)
         self._bm25: BM25Okapi | None = None
@@ -99,22 +103,35 @@ class HybridRetriever:
         if top_k is None:
             top_k = self.top_k
 
+        rewritten_query = self._rewrite_query(query) if self.enable_query_rewrite else query
+
         # 1. 向量检索
-        vector_results = self._vector_search(query, top_k * 2)
+        vector_results = self._vector_search(rewritten_query, top_k * 2)
 
         # 2. BM25 关键词检索
-        bm25_results = self._bm25_search(query, top_k * 2)
+        bm25_results = self._bm25_search(rewritten_query, top_k * 2)
 
         # 3. RRF 融合
         fused = self._rrf_fusion(vector_results, bm25_results, top_k)
+        if self.enable_rerank:
+            fused = self._rerank_results(query, fused)[:top_k]
 
         if not return_scores:
             for result in fused:
                 result.pop("hybrid_score", None)
                 result.pop("vector_score", None)
                 result.pop("bm25_score", None)
+                result.pop("rerank_score", None)
 
         return fused
+
+    def search_vector_only(self, query: str, top_k: int | None = None) -> List[dict]:
+        """只使用向量检索，便于评测对比。"""
+        return self._vector_search(query, top_k or self.top_k)
+
+    def search_bm25_only(self, query: str, top_k: int | None = None) -> List[dict]:
+        """只使用 BM25 检索，便于评测对比。"""
+        return self._bm25_search(query, top_k or self.top_k)
 
     def _vector_search(self, query: str, top_k: int) -> List[dict]:
         """向量检索 (Milvus)"""
@@ -160,6 +177,32 @@ class HybridRetriever:
         except Exception as e:
             print(f"[Retriever] BM25 检索失败: {e}")
             return []
+
+    def _rewrite_query(self, query: str) -> str:
+        """轻量查询扩展，避免引入额外 LLM 调用。"""
+        expansions = {
+            "rag": "检索增强生成 retrieval augmented generation",
+            "混合检索": "hybrid search bm25 向量检索 rrf",
+            "rrf": "reciprocal rank fusion 融合排序",
+            "部署": "环境 配置 数据库 milvus postgresql",
+            "架构": "模块 流程 组件 architecture",
+        }
+        lower = query.lower()
+        extra = []
+        for key, value in expansions.items():
+            if key in lower and value not in lower:
+                extra.append(value)
+        return query if not extra else f"{query} {' '.join(extra)}"
+
+    def _rerank_results(self, query: str, results: List[dict]) -> List[dict]:
+        """基于查询词覆盖度做轻量精排。"""
+        query_tokens = set(_tokenize(query))
+        for result in results:
+            content_tokens = set(_tokenize(result.get("content", "")))
+            overlap = len(query_tokens & content_tokens)
+            base_score = float(result.get("hybrid_score", result.get("score", 0.0)))
+            result["rerank_score"] = round(base_score + min(overlap * 0.0005, 0.003), 6)
+        return sorted(results, key=lambda item: item.get("rerank_score", 0), reverse=True)
 
     def _rrf_fusion(
         self,

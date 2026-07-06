@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document as LCDocument
 
 from models.llm import get_llm
+from rag.context import get_rag_context_manager
 
 
 # ============================================================
@@ -38,42 +39,7 @@ def build_context(results: List[dict], max_chars: int = 4000) -> str:
     - 填充到 max_chars 限制
     - 每条结果标注来源文件和页码
     """
-    context_parts = []
-    total_chars = 0
-    seen = set()  # 去重
-
-    for i, result in enumerate(results, start=1):
-        content = result.get("content", "").strip()
-        file_name = result.get("file_name", "未知文件")
-        page = result.get("source_page", 0)
-        score = result.get("hybrid_score", result.get("score", 0))
-
-        # 去重
-        content_key = content[:100]
-        if content_key in seen:
-            continue
-        seen.add(content_key)
-
-        # 检查是否超出长度限制
-        if total_chars + len(content) > max_chars:
-            # 截断最后一条
-            remaining = max_chars - total_chars
-            if remaining > 100:
-                content = content[:remaining] + "..."
-            else:
-                break
-
-        page_info = f" (第{page}页)" if page > 0 else ""
-        part = (
-            f"[文档片段 {i}]\n"
-            f"来源: {file_name}{page_info}\n"
-            f"相关度: {score:.4f}\n"
-            f"内容:\n{content}\n"
-        )
-        context_parts.append(part)
-        total_chars += len(content)
-
-    return "\n---\n".join(context_parts)
+    return get_rag_context_manager().build(results, max_chars=max_chars)
 
 
 def build_user_message(query: str, context: str) -> str:

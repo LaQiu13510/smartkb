@@ -1,18 +1,17 @@
-﻿# SmartKB
+# SmartKB
 
-SmartKB is a retrieval-augmented question-answering system for local knowledge bases. It loads documents, splits them into chunks, embeds the chunks, stores vectors in Milvus, combines dense retrieval with BM25, and generates grounded answers with DeepSeek.
+SmartKB is a local retrieval-augmented generation (RAG) knowledge-base application. It ingests documents, chunks text, creates embeddings, stores vectors in Milvus, combines vector retrieval with BM25 keyword retrieval, and generates grounded answers with source-aware context.
 
 ## Features
 
-- Document loading for Markdown, text, PDF, and DOCX files.
-- Recursive chunking with overlap for retrieval stability.
-- Multi-backend embedding wrapper with Zhipu, DashScope, HuggingFace, and Google fallback options.
-- Milvus vector storage with cosine similarity search.
-- PostgreSQL metadata, chat history, and evaluation records.
-- Hybrid retrieval with vector search, BM25, and reciprocal-rank fusion.
-- LangGraph agent wrapper for route -> retrieve -> generate flow.
-- Streamlit UI for document management, chat, system status, and evaluation.
-- Import and end-to-end test scripts.
+- Load Markdown, TXT, PDF, and DOCX documents.
+- Split documents with Chinese-friendly recursive text splitting.
+- Support multiple embedding backends, including Zhipu, DashScope, HuggingFace, and Google.
+- Store vectors in Milvus and metadata, chat history, and evaluation records in PostgreSQL.
+- Retrieve with vector search, BM25 search, reciprocal-rank fusion, lightweight query rewriting, and reranking.
+- Manage RAG context with source labels, deduplication, length budgeting, and sensitive-data redaction.
+- Provide a LangGraph RAG agent with `retrieve`, `list`, and `chat` routes.
+- Include a Streamlit interface for document management, chat, status checks, and evaluation.
 
 ## Architecture
 
@@ -23,11 +22,12 @@ Documents
   -> embedding model
   -> Milvus vectors + PostgreSQL metadata
   -> hybrid retriever
-  -> DeepSeek generation chain
+  -> RAG context manager
+  -> generation chain
   -> Streamlit UI / LangGraph agent
 ```
 
-## Directory Structure
+## Project Structure
 
 ```text
 smartkb-rag/
@@ -37,31 +37,71 @@ smartkb-rag/
 ├── test_e2e.py
 ├── agent/
 ├── database/
+├── docs/
+├── documents/
 ├── eval/
 ├── models/
-├── rag/
-├── documents/
-└── docs/
+└── rag/
 ```
 
-## Quick Start
+## Installation
 
-```powershell
+```bash
+git clone <your-repository-url>
 cd smartkb-rag
-E:\Anaconda_envs\envs\langchain\python.exe test_imports.py
-E:\Anaconda_envs\envs\langchain\python.exe test_e2e.py
-streamlit run app.py --server.port 8501
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
-
-Open http://localhost:8501.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in provider keys and database addresses for live runs. The default tests run offline and do not require real credentials. Do not commit real credentials.
+Copy the example environment file and fill in your own service credentials.
+
+```bash
+cp .env.example .env
+```
+
+Required live services:
+
+- DeepSeek-compatible chat API
+- At least one embedding provider or a local HuggingFace embedding model
+- Milvus
+- PostgreSQL
+
+Do not commit real credentials.
+
+## Usage
+
+Run the Streamlit app:
+
+```bash
+streamlit run app.py --server.port 8501
+```
+
+Open the local URL shown by Streamlit, upload documents, build the knowledge base, and start asking questions.
+
+## Tests
+
+The default tests are offline and do not require external services.
+
+```bash
+python test_imports.py
+python test_e2e.py
+python eval/agent_eval.py
+python eval/retrieval_eval.py
+```
+
+Live checks can be run after `.env` is configured:
+
+```bash
+python test_imports.py --live
+python test_e2e.py --live
+```
 
 ## Documentation
 
-- `docs/PROJECT_REPORT.md`: complete project report.
-- `docs/ARCHITECTURE.md`: module responsibilities and data flow.
-- `docs/EVALUATION.md`: evaluation metrics and test strategy.
-- `docs/DEPLOYMENT.md`: local runbook and troubleshooting.
+- `docs/ARCHITECTURE.md`
+- `docs/DEPLOYMENT.md`
+- `docs/EVALUATION.md`
+- `docs/PROJECT_REPORT.md`
