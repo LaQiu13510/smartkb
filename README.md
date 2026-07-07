@@ -1,6 +1,6 @@
 # SmartKB
 
-SmartKB is a local retrieval-augmented generation (RAG) knowledge-base application. It ingests documents, chunks text, creates embeddings, stores vectors in Milvus, combines vector retrieval with BM25 keyword retrieval, and generates grounded answers with source-aware context.
+SmartKB is a local retrieval-augmented generation (RAG) knowledge-base application. It ingests documents, chunks text, creates embeddings, stores vectors in Milvus, combines vector retrieval with BM25 keyword retrieval, generates grounded answers with source-aware context, and provides a FastAPI web interface.
 
 ## Features
 
@@ -11,7 +11,7 @@ SmartKB is a local retrieval-augmented generation (RAG) knowledge-base applicati
 - Retrieve with vector search, BM25 search, reciprocal-rank fusion, lightweight query rewriting, and reranking.
 - Manage RAG context with source labels, deduplication, length budgeting, and sensitive-data redaction.
 - Provide a LangGraph RAG agent with `retrieve`, `list`, and `chat` routes.
-- Include a Streamlit interface for document management, chat, status checks, and evaluation.
+- Include a FastAPI dashboard for text indexing, knowledge-base chat, status checks, sources, and retrieved chunks.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ Documents
   -> hybrid retriever
   -> RAG context manager
   -> generation chain
-  -> Streamlit UI / LangGraph agent
+  -> FastAPI UI / LangGraph agent
 ```
 
 ## Project Structure
@@ -69,17 +69,16 @@ Required live services:
 - Milvus
 - PostgreSQL
 
-Do not commit real credentials.
 
 ## Usage
 
-Run the Streamlit app:
+Run the FastAPI app:
 
 ```bash
-streamlit run app.py --server.port 8501
+uvicorn app:app --host 127.0.0.1 --port 8501
 ```
 
-Open the local URL shown by Streamlit, upload documents, build the knowledge base, and start asking questions.
+Open `http://127.0.0.1:8501`, add text to the knowledge base, and start asking questions.
 
 ## Tests
 
