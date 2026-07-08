@@ -1,20 +1,27 @@
-# SmartKB
+# SmartKB 智能知识库问答系统
 
-SmartKB is a local retrieval-augmented generation (RAG) knowledge-base application. It ingests documents, chunks text, creates embeddings, stores vectors in Milvus, combines vector retrieval with BM25 keyword retrieval, generates grounded answers with source-aware context, and provides a FastAPI web interface.
+SmartKB 是一个本地 RAG（Retrieval-Augmented Generation，检索增强生成）知识库问答系统。项目支持文档解析、文本切分、Embedding、Milvus 向量检索、BM25 关键词检索、RRF 融合、上下文管理和带来源的答案生成，并提供 FastAPI Web 界面。
 
-## Features
+## 项目背景
 
-- Load Markdown, TXT, PDF, and DOCX documents.
-- Split documents with semantic-aware chunking and recursive fallback.
-- Support multiple embedding backends, including Zhipu, DashScope, HuggingFace, and Google.
-- Store vectors in Milvus and metadata, chat history, and evaluation records in PostgreSQL.
-- Retrieve with vector search, BM25 search, reciprocal-rank fusion, lightweight query rewriting, and reranking.
-- Manage RAG context with source labels, deduplication, length budgeting, and sensitive-data redaction.
-- Provide a LangGraph RAG agent with `retrieve`, `list`, and `chat` routes.
-- Include a FastAPI dashboard for text indexing, knowledge-base chat, status checks, sources, and retrieved chunks.
-- Stream answers to the browser with Server-Sent Events (SSE).
+在企业内部，制度文档、技术规范、项目资料、接口说明和运维手册通常分散在不同文件和系统中。随着文档数量增长，员工在查找信息时需要反复搜索和阅读多个文档，效率低，也容易遗漏关键信息。
 
-## Architecture
+SmartKB 面向这个问题构建企业内部知识库问答系统：将内部文档解析、切分、向量化并写入知识库，员工可以直接用自然语言提问，系统通过混合检索找到相关片段，并结合大模型生成带来源的回答，从而降低内部资料检索成本，提高知识复用效率。
+
+## 功能特性
+
+- 支持 Markdown、TXT、PDF、DOCX 文档处理。
+- 支持语义感知分块，并保留递归字符切分作为 fallback。
+- 支持智谱、DashScope、HuggingFace、Google 等 Embedding 后端。
+- 使用 Milvus 存储向量。
+- 使用 PostgreSQL 存储文档元数据、对话历史和评测记录。
+- 支持向量检索、BM25 检索、RRF 融合、轻量 query rewrite 和 rerank。
+- 使用 RAG 上下文管理器处理来源标注、去重、长度预算和敏感信息脱敏。
+- 提供 LangGraph RAG Agent，支持 `retrieve`、`list`、`chat` 路由。
+- 提供 FastAPI Web 界面，支持文本入库、知识库问答、来源展示和检索片段展示。
+- 支持 SSE（Server-Sent Events）流式输出。
+
+## 系统架构
 
 ```text
 Documents
@@ -28,7 +35,7 @@ Documents
   -> FastAPI UI / LangGraph agent
 ```
 
-## Project Structure
+## 目录结构
 
 ```text
 smartkb-rag/
@@ -45,7 +52,7 @@ smartkb-rag/
 └── rag/
 ```
 
-## Installation
+## 安装
 
 ```bash
 git clone <your-repository-url>
@@ -55,35 +62,39 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Configuration
+## 配置
 
-Copy the example environment file and fill in your own service credentials.
+复制环境变量模板，并填写自己的模型、数据库和向量库配置。
 
 ```bash
 cp .env.example .env
 ```
 
-Required live services:
+真实运行时通常需要：
 
-- DeepSeek-compatible chat API
-- At least one embedding provider or a local HuggingFace embedding model
+- DeepSeek 兼容聊天模型 API
+- 至少一个 Embedding 服务或本地 HuggingFace Embedding 模型
 - Milvus
 - PostgreSQL
 
 
-## Usage
+## 运行
 
-Run the FastAPI app:
+启动 FastAPI 应用：
 
 ```bash
 uvicorn app:app --host 127.0.0.1 --port 8501
 ```
 
-Open `http://127.0.0.1:8501`, add text to the knowledge base, and start asking questions.
+打开浏览器访问：
 
-## Tests
+```text
+http://127.0.0.1:8501
+```
 
-The default tests are offline and do not require external services.
+## 测试
+
+默认测试为离线测试，不依赖外部服务。
 
 ```bash
 python test_imports.py
@@ -92,14 +103,14 @@ python eval/agent_eval.py
 python eval/retrieval_eval.py
 ```
 
-Live checks can be run after `.env` is configured:
+配置 `.env` 后可以运行 live 检查：
 
 ```bash
 python test_imports.py --live
 python test_e2e.py --live
 ```
 
-## Documentation
+## 文档
 
 - `docs/ARCHITECTURE.md`
 - `docs/DEPLOYMENT.md`
