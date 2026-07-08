@@ -6,11 +6,10 @@
 
 检索策略演进 (记录在项目报告中):
   版本 1.0: 纯向量检索 (Milvus COSINE) → 关键词匹配能力弱
-  版本 2.0: 混合检索 (向量 + BM25 + RRF) → 兼顾语义和关键词 ← 当前方案
-  版本 3.0: (TODO) 引入 Cross-encoder Reranker → 精排 Top-K 结果
+  版本 2.0: 混合检索 (向量 + BM25 + RRF) → 兼顾语义和关键词
+  版本 3.0: Query rewrite + Reranker → 默认轻量词汇精排，可选 CrossEncoder 精排 ← 当前方案
 """
 
-import math
 from typing import List, Optional
 
 from rank_bm25 import BM25Okapi
@@ -43,6 +42,8 @@ class HybridRetriever:
         rrf_k: int = 60,
         enable_query_rewrite: bool = True,
         enable_rerank: bool = True,
+        rerank_mode: str = "lexical",
+        cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     ):
         """
         Args:
@@ -59,6 +60,9 @@ class HybridRetriever:
         self.rrf_k = rrf_k
         self.enable_query_rewrite = enable_query_rewrite
         self.enable_rerank = enable_rerank
+        self.rerank_mode = rerank_mode
+        self.cross_encoder_model = cross_encoder_model
+        self._cross_encoder = None
 
         # BM25 索引 (需要构建)
         self._bm25: BM25Okapi | None = None
@@ -122,6 +126,7 @@ class HybridRetriever:
                 result.pop("vector_score", None)
                 result.pop("bm25_score", None)
                 result.pop("rerank_score", None)
+                result.pop("cross_encoder_score", None)
 
         return fused
 
@@ -195,6 +200,14 @@ class HybridRetriever:
         return query if not extra else f"{query} {' '.join(extra)}"
 
     def _rerank_results(self, query: str, results: List[dict]) -> List[dict]:
+        """精排：优先 CrossEncoder，可失败回退到轻量词汇精排。"""
+        if self.rerank_mode == "cross_encoder":
+            ranked = self._cross_encoder_rerank(query, results)
+            if ranked:
+                return ranked
+        return self._lexical_rerank(query, results)
+
+    def _lexical_rerank(self, query: str, results: List[dict]) -> List[dict]:
         """基于查询词覆盖度做轻量精排。"""
         query_tokens = set(_tokenize(query))
         for result in results:
@@ -203,6 +216,29 @@ class HybridRetriever:
             base_score = float(result.get("hybrid_score", result.get("score", 0.0)))
             result["rerank_score"] = round(base_score + min(overlap * 0.0005, 0.003), 6)
         return sorted(results, key=lambda item: item.get("rerank_score", 0), reverse=True)
+
+    def _cross_encoder_rerank(self, query: str, results: List[dict]) -> List[dict]:
+        """使用 CrossEncoder 对候选片段精排；不可用时返回空列表。"""
+        if not results:
+            return []
+        try:
+            model = self._get_cross_encoder()
+            pairs = [(query, item.get("content", "")) for item in results]
+            scores = model.predict(pairs)
+            for item, score in zip(results, scores):
+                item["cross_encoder_score"] = float(score)
+                item["rerank_score"] = float(score)
+            return sorted(results, key=lambda item: item.get("cross_encoder_score", 0), reverse=True)
+        except Exception as exc:
+            print(f"[Retriever] CrossEncoder 精排不可用，回退词汇精排: {str(exc)[:120]}")
+            return []
+
+    def _get_cross_encoder(self):
+        if self._cross_encoder is None:
+            from sentence_transformers import CrossEncoder
+
+            self._cross_encoder = CrossEncoder(self.cross_encoder_model)
+        return self._cross_encoder
 
     def _rrf_fusion(
         self,

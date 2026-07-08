@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import time
 from functools import lru_cache
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import TOP_K_RETRIEVAL
@@ -159,6 +161,47 @@ def query(request: QueryRequest) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:500], "answer": "", "sources": [], "results": [], "latency_ms": 0}
+
+
+@app.get("/api/query/stream")
+def query_stream(
+    query: str,
+    session_id: str = "smartkb-demo",
+    top_k: int = TOP_K_RETRIEVAL,
+) -> StreamingResponse:
+    def generate():
+        yield sse("stage", {"message": "正在检索知识库"})
+        try:
+            result = query_answer(query, session_id=session_id, top_k=top_k)
+            if not result.get("ok"):
+                yield sse("error", {"message": result.get("error", "查询失败")})
+                return
+            yield sse("stage", {"message": "正在生成回答"})
+            for chunk in chunk_text(result.get("answer", "")):
+                yield sse("delta", {"text": chunk})
+            yield sse("final", result)
+        except Exception as exc:
+            yield sse("app_error", {"message": str(exc)[:500]})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def query_answer(query_text: str, session_id: str, top_k: int) -> dict[str, Any]:
+    request = QueryRequest(query=query_text, session_id=session_id, top_k=top_k)
+    return query(request)
+
+
+def sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def chunk_text(text: str, size: int = 28):
+    for index in range(0, len(text), size):
+        yield text[index:index + size]
 
 
 @app.post("/api/index-text")
@@ -466,21 +509,26 @@ INDEX_HTML = r"""
       const query = queryInput.value.trim();
       if (!query) return;
       document.body.classList.add("loading");
-      answerBox.innerHTML = `<div class="msg question">${escapeHtml(query)}</div><div class="msg muted">检索和生成中...</div>`;
-      try {
-        const response = await fetch("/api/query", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({query, session_id: "smartkb-web"})
-        });
-        const data = await response.json();
-        if (!data.ok) {
-          answerBox.innerHTML = `<div class="msg question">${escapeHtml(query)}</div><div class="msg bad">${escapeHtml(data.error)}</div>`;
-          return;
-        }
+      answerBox.innerHTML = `<div class="msg question">${escapeHtml(query)}</div><div class="msg muted" id="stream-state">正在连接流式接口...</div><div class="msg" id="stream-answer"></div>`;
+      const stateBox = document.getElementById("stream-state");
+      const streamAnswer = document.getElementById("stream-answer");
+      const params = new URLSearchParams({query, session_id: "smartkb-web"});
+      const events = new EventSource(`/api/query/stream?${params.toString()}`);
+      let streamDone = false;
+      events.addEventListener("stage", event => {
+        const data = JSON.parse(event.data);
+        stateBox.textContent = data.message || "处理中...";
+      });
+      events.addEventListener("delta", event => {
+        const data = JSON.parse(event.data);
+        streamAnswer.textContent += data.text || "";
+      });
+      events.addEventListener("final", event => {
+        streamDone = true;
+        const data = JSON.parse(event.data);
         setMetric("metric-latency", `${data.latency_ms} ms`);
         setMetric("metric-sources", (data.sources || []).length);
-        answerBox.innerHTML = `<div class="msg question">${escapeHtml(query)}</div><div class="msg">${escapeHtml(data.answer)}</div>`;
+        stateBox.textContent = "完成";
         document.getElementById("sources").innerHTML = (data.sources || []).map(src =>
           `<span class="source-chip">${escapeHtml(src)}</span>`
         ).join("") || "<div class='muted'>无来源。</div>";
@@ -490,9 +538,24 @@ INDEX_HTML = r"""
             <pre>${escapeHtml((item.content || "").slice(0, 900))}</pre>
           </details>
         `).join("");
-      } finally {
+        events.close();
         document.body.classList.remove("loading");
-      }
+      });
+      events.addEventListener("app_error", event => {
+        let message = "流式连接失败";
+        try { message = JSON.parse(event.data).message || message; } catch {}
+        stateBox.className = "msg bad";
+        stateBox.textContent = message;
+        events.close();
+        document.body.classList.remove("loading");
+      });
+      events.onerror = () => {
+        if (streamDone) return;
+        stateBox.className = "msg bad";
+        stateBox.textContent = "流式连接失败";
+        events.close();
+        document.body.classList.remove("loading");
+      };
     }
 
     async function indexText() {

@@ -5,13 +5,14 @@ SmartKB is a local retrieval-augmented generation (RAG) knowledge-base applicati
 ## Features
 
 - Load Markdown, TXT, PDF, and DOCX documents.
-- Split documents with Chinese-friendly recursive text splitting.
+- Split documents with semantic-aware chunking and recursive fallback.
 - Support multiple embedding backends, including Zhipu, DashScope, HuggingFace, and Google.
 - Store vectors in Milvus and metadata, chat history, and evaluation records in PostgreSQL.
 - Retrieve with vector search, BM25 search, reciprocal-rank fusion, lightweight query rewriting, and reranking.
 - Manage RAG context with source labels, deduplication, length budgeting, and sensitive-data redaction.
 - Provide a LangGraph RAG agent with `retrieve`, `list`, and `chat` routes.
 - Include a FastAPI dashboard for text indexing, knowledge-base chat, status checks, sources, and retrieved chunks.
+- Stream answers to the browser with Server-Sent Events (SSE).
 
 ## Architecture
 
