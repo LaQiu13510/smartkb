@@ -96,6 +96,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 def run_offline_e2e():
     import rag.retriever as retriever_module
+    import rag.splitter as splitter_module
     from rag.chain import build_context
     from rag.loader import DocumentLoader
     from rag.retriever import HybridRetriever
@@ -107,6 +108,7 @@ def run_offline_e2e():
 
     fake_embedding = FakeEmbeddingModel()
     retriever_module.get_embedding_model = lambda: fake_embedding
+    splitter_module.get_embedding_model = lambda: fake_embedding
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

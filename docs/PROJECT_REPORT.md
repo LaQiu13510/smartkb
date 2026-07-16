@@ -1,86 +1,48 @@
-﻿# SmartKB Project Report
+# SmartKB 项目设计说明
 
-## Overview
+## 项目目标
 
-SmartKB is a complete RAG application for document-based question answering. It connects document ingestion, chunking, embedding, vector search, keyword search, answer generation, evaluation, and UI presentation into one runnable system.
+SmartKB 用于降低企业内部资料查找成本。系统把文档解析、语义分块、向量化、混合检索、上下文治理和答案生成连接成可运行链路，并通过来源标注提升回答的可追踪性。
 
-## Goals
+## 关键设计
 
-1. Build a local knowledge-base question-answering system with source-grounded answers.
-2. Support reliable retrieval over mixed Chinese and English documents.
-3. Store vectors and metadata in production-style infrastructure.
-4. Provide evaluation metrics that reveal retrieval quality.
-5. Offer a Streamlit UI suitable for local demonstration and debugging.
+### 文档处理
 
-## Data Flow
+`DocumentLoader` 统一处理 Markdown、TXT、PDF 和 DOCX。`TextSplitter` 优先利用 Embedding 余弦相似度检测主题变化，同时保留标题和段落边界；模型服务异常时自动回退，避免入库流程完全中断。
 
-```text
-Upload document
-  -> parse content
-  -> split into chunks
-  -> embed chunks
-  -> write vectors to Milvus
-  -> write metadata to PostgreSQL
-  -> retrieve with vector search and BM25
-  -> fuse rankings with RRF
-  -> generate answer with DeepSeek
-  -> show answer and sources
-```
+### 混合检索
 
-## Core Modules
+系统同时使用 Milvus 向量检索与 BM25 关键词检索。向量检索适合语义改写，BM25 适合缩写、配置项和专业术语。两路结果经 RRF 融合，再对扩大后的候选集执行精排。
 
-| Module | Responsibility |
+### 上下文管理
+
+检索结果不会直接拼接进入 Prompt。上下文模块先去除重复证据，再根据字符和 Token 预算截断，并为每段内容保留文件名、页码和相关度，同时对密钥和连接串进行脱敏。
+
+### 缓存与一致性
+
+Redis TTL Cache 用于减少高频问题的重复检索和模型调用。文档入库、覆盖更新或删除后，系统同步清理查询缓存并重建 Retriever，避免继续返回旧内容。
+
+### 工程化
+
+FastAPI 同时提供 Web 页面和结构化 API；SSE 直接转发模型输出 Token。Docker Compose 提供完整依赖环境，GitHub Actions 运行编译、Compose 配置校验、离线测试和评测脚本。
+
+## 模块职责
+
+| 模块 | 职责 |
 | --- | --- |
-| `models/embedding.py` | Embedding backend selection and vector generation |
-| `models/llm.py` | DeepSeek chat wrapper |
-| `database/milvus_store.py` | Vector collection management and similarity search |
-| `database/postgres_store.py` | Document metadata, chat history, and evaluation records |
-| `rag/loader.py` | Document parsing |
-| `rag/splitter.py` | Chunking strategy |
-| `rag/retriever.py` | Hybrid retrieval and RRF fusion |
-| `rag/chain.py` | Prompt assembly and answer generation |
-| `agent/graph.py` | LangGraph flow around retrieval and generation |
-| `eval/metrics.py` | Hit Rate, MRR, and LLM-based answer checks |
-| `app.py` | Streamlit UI |
+| `rag/loader.py` | 文件解析和元数据统一 |
+| `rag/splitter.py` | Embedding 语义分块与递归降级 |
+| `rag/retriever.py` | 向量召回、BM25、RRF、Query Rewrite、Rerank |
+| `rag/context.py` | 去重、预算、来源和脱敏 |
+| `rag/chain.py` | 提示词构建与模型生成 |
+| `cache_store.py` | Redis / 内存缓存统一接口 |
+| `database/` | 向量与关系数据访问 |
+| `agent/` | LangGraph 问答路由 |
+| `app.py` | FastAPI、文档管理、问答与 SSE |
+| `eval/` | 路由和检索评测 |
 
-## Retrieval Design
+## 已知边界
 
-SmartKB combines two retrieval strategies:
-
-- Dense retrieval: embeds the query and searches Milvus by cosine similarity.
-- BM25 retrieval: tokenizes text with jieba and ranks chunks by lexical relevance.
-
-The final ranking uses reciprocal-rank fusion. This improves robustness when a query contains either semantic paraphrases or exact keywords.
-
-## Embedding Design
-
-The embedding wrapper attempts providers in a stable order. The primary provider uses a 1024-dimensional embedding model, and Milvus collection dimension checks prevent mismatched vectors from silently corrupting search results.
-
-## Evaluation
-
-The evaluation layer checks retrieval and answer quality with:
-
-- Hit Rate: whether expected evidence appears in top-k results.
-- MRR: how early the expected evidence appears.
-- LLM judge: whether the generated answer is grounded and useful.
-
-## UI
-
-The Streamlit app provides:
-
-- System health status.
-- Document upload and indexing.
-- Knowledge-base chat.
-- Source display.
-- Evaluation dashboard.
-- Example document loading.
-
-## Current Status
-
-SmartKB is complete as a local RAG application:
-
-- Core modules import successfully.
-- Offline tests validate imports, document processing, BM25 retrieval, RRF fusion, and context construction without external services.
-- Optional live checks validate embedding, LLM, Milvus, PostgreSQL, retrieval, generation, agent flow, and evaluation on a configured local environment.
-- The UI can be started with Streamlit.
-- GitHub-safe documentation and configuration templates are included.
+- 默认轻量 Rerank 不等同于训练后的专业排序模型，可通过配置启用 Cross Encoder。
+- PostgreSQL 元数据和 Milvus 向量更新属于跨存储操作，当前通过顺序执行和错误返回控制风险，未实现分布式事务。
+- 进程内缓存只适合单实例降级，多实例部署应配置 Redis。

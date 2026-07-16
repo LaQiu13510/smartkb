@@ -10,7 +10,8 @@
   版本 3.0: Query rewrite + Reranker → 默认轻量词汇精排，可选 CrossEncoder 精排 ← 当前方案
 """
 
-from typing import List, Optional
+import re
+from typing import List
 
 from rank_bm25 import BM25Okapi
 import jieba
@@ -24,7 +25,11 @@ def _tokenize(text: str) -> List[str]:
     # jieba 分词
     tokens = list(jieba.cut(text))
     # 过滤空字符和纯空白
-    tokens = [t.strip().lower() for t in tokens if t.strip()]
+    tokens = [
+        token.strip().lower()
+        for token in tokens
+        if token.strip() and re.search(r"[\u4e00-\u9fffA-Za-z0-9_]", token)
+    ]
     return tokens
 
 
@@ -116,7 +121,8 @@ class HybridRetriever:
         bm25_results = self._bm25_search(rewritten_query, top_k * 2)
 
         # 3. RRF 融合
-        fused = self._rrf_fusion(vector_results, bm25_results, top_k)
+        candidate_k = top_k * 2 if self.enable_rerank else top_k
+        fused = self._rrf_fusion(vector_results, bm25_results, candidate_k)
         if self.enable_rerank:
             fused = self._rerank_results(query, fused)[:top_k]
 
@@ -208,13 +214,23 @@ class HybridRetriever:
         return self._lexical_rerank(query, results)
 
     def _lexical_rerank(self, query: str, results: List[dict]) -> List[dict]:
-        """基于查询词覆盖度做轻量精排。"""
+        """融合原始召回分数与查询词覆盖度做轻量精排。"""
         query_tokens = set(_tokenize(query))
+        max_base_score = max(
+            (float(item.get("hybrid_score", item.get("score", 0.0))) for item in results),
+            default=1.0,
+        ) or 1.0
         for result in results:
             content_tokens = set(_tokenize(result.get("content", "")))
             overlap = len(query_tokens & content_tokens)
             base_score = float(result.get("hybrid_score", result.get("score", 0.0)))
-            result["rerank_score"] = round(base_score + min(overlap * 0.0005, 0.003), 6)
+            base_normalized = base_score / max_base_score
+            query_coverage = overlap / max(len(query_tokens), 1)
+            phrase_bonus = 0.05 if query.strip().lower() in result.get("content", "").lower() else 0.0
+            result["rerank_score"] = round(
+                base_normalized * 0.75 + query_coverage * 0.25 + phrase_bonus,
+                6,
+            )
         return sorted(results, key=lambda item: item.get("rerank_score", 0), reverse=True)
 
     def _cross_encoder_rerank(self, query: str, results: List[dict]) -> List[dict]:

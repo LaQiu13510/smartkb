@@ -5,23 +5,37 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import tempfile
 import time
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Query as QueryParam, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from cache_store import get_cache_store, make_query_cache_key
-from config import QUERY_CACHE_ENABLED, QUERY_CACHE_TTL_SECONDS, TOP_K_RETRIEVAL
+from config import (
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    MAX_UPLOAD_BYTES,
+    QUERY_CACHE_ENABLED,
+    QUERY_CACHE_TTL_SECONDS,
+    RERANK_MODE,
+    RERANK_MODEL,
+    SPLITTER_SEMANTIC_EMBEDDINGS,
+    SPLITTER_SEMANTIC_THRESHOLD,
+    SPLITTER_STRATEGY,
+    TOP_K_RETRIEVAL,
+)
 from database.milvus_store import get_milvus_store
 from database.postgres_store import get_postgres_store
 from models.embedding import get_embedding_model
 from models.llm import get_llm
 from rag.chain import get_rag_chain
-from rag.loader import Document
+from rag.loader import Document, DocumentLoader
 from rag.retriever import HybridRetriever
 from rag.splitter import TextSplitter
 
@@ -54,14 +68,30 @@ def safe_call(label: str, fn) -> dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def splitter() -> TextSplitter:
-    return TextSplitter()
+    return TextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        strategy=SPLITTER_STRATEGY,
+        semantic_threshold=SPLITTER_SEMANTIC_THRESHOLD,
+        semantic_embeddings=SPLITTER_SEMANTIC_EMBEDDINGS,
+    )
 
 
-def build_retriever() -> HybridRetriever:
+@lru_cache(maxsize=1)
+def get_retriever_cached() -> HybridRetriever:
     milvus = get_milvus_store()
-    retriever = HybridRetriever(milvus_store=milvus, top_k=TOP_K_RETRIEVAL)
+    retriever = HybridRetriever(
+        milvus_store=milvus,
+        top_k=TOP_K_RETRIEVAL,
+        rerank_mode=RERANK_MODE,
+        cross_encoder_model=RERANK_MODEL,
+    )
     rebuild_bm25(retriever)
     return retriever
+
+
+def invalidate_retriever() -> None:
+    get_retriever_cached.cache_clear()
 
 
 def rebuild_bm25(retriever: HybridRetriever) -> None:
@@ -206,7 +236,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
                 )
                 return result
 
-        retriever = build_retriever()
+        retriever = get_retriever_cached()
         results = retriever.search(request.query, top_k=request.top_k)
         answer = get_rag_chain().answer(request.query, results)
         elapsed = round((time.time() - start) * 1000, 1)
@@ -238,20 +268,70 @@ def query(request: QueryRequest) -> dict[str, Any]:
 
 @app.get("/api/query/stream")
 def query_stream(
-    query: str,
+    query: str = QueryParam(..., min_length=1, max_length=4000),
     session_id: str = "smartkb-demo",
-    top_k: int = TOP_K_RETRIEVAL,
+    top_k: int = QueryParam(default=TOP_K_RETRIEVAL, ge=1, le=12),
 ) -> StreamingResponse:
     def generate():
-        yield sse("stage", {"message": "正在检索知识库"})
+        start = time.time()
+        cache_key = make_query_cache_key(query, top_k)
         try:
-            result = query_answer(query, session_id=session_id, top_k=top_k)
-            if not result.get("ok"):
-                yield sse("error", {"message": result.get("error", "查询失败")})
-                return
+            if QUERY_CACHE_ENABLED:
+                try:
+                    cached = get_cache_store().get_json(cache_key)
+                except Exception:
+                    cached = None
+                if cached:
+                    yield sse("stage", {"message": "缓存命中，正在返回回答"})
+                    for chunk in chunk_text(cached.get("answer", "")):
+                        yield sse("delta", {"text": chunk})
+                    elapsed = round((time.time() - start) * 1000, 1)
+                    result = {
+                        **cached,
+                        "latency_ms": elapsed,
+                        "cached_latency_ms": cached.get("latency_ms", 0),
+                        "cache_hit": True,
+                        "cache": {"hit": True, "key": cache_key, **cache_stats()},
+                    }
+                    persist_chat(
+                        session_id,
+                        query,
+                        result.get("answer", ""),
+                        result.get("sources", []),
+                        elapsed,
+                    )
+                    yield sse("final", result)
+                    return
+
+            yield sse("stage", {"message": "正在检索知识库"})
+            retriever = get_retriever_cached()
+            results = retriever.search(query, top_k=top_k)
             yield sse("stage", {"message": "正在生成回答"})
-            for chunk in chunk_text(result.get("answer", "")):
+            answer_parts = []
+            for chunk in get_rag_chain().stream_answer(query, results):
+                answer_parts.append(chunk)
                 yield sse("delta", {"text": chunk})
+
+            answer_text = "".join(answer_parts)
+            elapsed = round((time.time() - start) * 1000, 1)
+            sources = list(dict.fromkeys(
+                item.get("file_name", "未知") for item in results
+            ))
+            result = {
+                "ok": True,
+                "answer": answer_text,
+                "sources": sources,
+                "results": results,
+                "latency_ms": elapsed,
+                "cache_hit": False,
+                "cache": {"hit": False, "key": cache_key, **cache_stats()},
+            }
+            persist_chat(session_id, query, answer_text, sources, elapsed)
+            if QUERY_CACHE_ENABLED:
+                try:
+                    get_cache_store().set_json(cache_key, result, QUERY_CACHE_TTL_SECONDS)
+                except Exception:
+                    pass
             yield sse("final", result)
         except Exception as exc:
             yield sse("app_error", {"message": str(exc)[:500]})
@@ -277,6 +357,63 @@ def chunk_text(text: str, size: int = 28):
         yield text[index:index + size]
 
 
+def index_documents(
+    file_name: str,
+    documents: list[Document],
+    file_size: int,
+) -> dict[str, Any]:
+    if not documents:
+        raise ValueError("文档中没有可索引的文本内容")
+
+    chunks = splitter().split_documents(documents)
+    if not chunks:
+        raise ValueError("文档切分结果为空")
+
+    contents = [chunk.page_content for chunk in chunks]
+    embeddings = get_embedding_model().embed_documents(contents)
+    file_hash = documents[0].metadata.get("file_hash") or hashlib.md5(
+        "\n".join(contents).encode("utf-8")
+    ).hexdigest()[:12]
+    ids = [
+        hashlib.md5(f"{file_hash}:{index}".encode("utf-8")).hexdigest()[:24]
+        for index, _ in enumerate(chunks)
+    ]
+
+    milvus = get_milvus_store()
+    try:
+        milvus.delete_by_file(file_name)
+    except Exception:
+        pass
+    inserted = milvus.insert(
+        ids=ids,
+        contents=contents,
+        embeddings=embeddings,
+        file_names=[file_name] * len(chunks),
+        chunk_indices=[chunk.metadata.get("chunk_index", index) for index, chunk in enumerate(chunks)],
+        source_pages=[chunk.metadata.get("page", 0) for chunk in chunks],
+    )
+    get_postgres_store().add_document(
+        file_name=file_name,
+        file_type=documents[0].metadata.get("file_type", "txt"),
+        file_size=file_size,
+        chunk_count=len(chunks),
+        total_chars=sum(len(item.page_content) for item in documents),
+    )
+
+    invalidate_retriever()
+    try:
+        cache_invalidated = get_cache_store().delete_prefix("query:")
+    except Exception:
+        cache_invalidated = 0
+    return {
+        "ok": True,
+        "file_name": file_name,
+        "chunks": len(chunks),
+        "inserted": inserted,
+        "cache_invalidated": cache_invalidated,
+    }
+
+
 @app.post("/api/index-text")
 def index_text(request: TextIndexRequest) -> dict[str, Any]:
     try:
@@ -291,36 +428,56 @@ def index_text(request: TextIndexRequest) -> dict[str, Any]:
                 "page": 0,
             },
         )
-        chunks = splitter().split_documents([doc])
-        contents = [chunk.page_content for chunk in chunks]
-        embeddings = get_embedding_model().embed_documents(contents)
-        ids = [
-            hashlib.md5(f"{file_hash}:{idx}".encode("utf-8")).hexdigest()[:24]
-            for idx, _ in enumerate(chunks)
-        ]
-        get_milvus_store().insert(
-            ids=ids,
-            contents=contents,
-            embeddings=embeddings,
-            file_names=[file_name] * len(chunks),
-            chunk_indices=[chunk.metadata.get("chunk_index", idx) for idx, chunk in enumerate(chunks)],
-            source_pages=[0] * len(chunks),
-        )
-        get_postgres_store().add_document(
+        return index_documents(
             file_name=file_name,
-            file_type=doc.metadata.get("file_type", "txt"),
+            documents=[doc],
             file_size=len(request.content.encode("utf-8")),
-            chunk_count=len(chunks),
-            total_chars=len(request.content),
         )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500]}
+
+
+@app.post("/api/index-file")
+async def index_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    file_name = Path(file.filename or "").name
+    suffix = Path(file_name).suffix.lower()
+    if not file_name or suffix not in DocumentLoader.SUPPORTED_SUFFIXES:
+        return {
+            "ok": False,
+            "error": f"仅支持这些文件类型: {', '.join(DocumentLoader.SUPPORTED_SUFFIXES)}",
+        }
+
+    payload = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_UPLOAD_BYTES:
+        return {"ok": False, "error": f"文件超过大小限制: {MAX_UPLOAD_BYTES} bytes"}
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="smartkb-upload-") as tmp_dir:
+            temp_path = Path(tmp_dir) / file_name
+            temp_path.write_bytes(payload)
+            documents = DocumentLoader.load_file(temp_path)
+        return index_documents(file_name, documents, len(payload))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500]}
+
+
+@app.delete("/api/documents/{file_name}")
+def delete_document(file_name: str) -> dict[str, Any]:
+    safe_name = Path(file_name).name
+    if not safe_name or safe_name != file_name:
+        return {"ok": False, "error": "文件名不合法"}
+    try:
+        vectors = get_milvus_store().delete_by_file(safe_name)
+        get_postgres_store().delete_document(safe_name)
+        invalidate_retriever()
         try:
             cache_invalidated = get_cache_store().delete_prefix("query:")
         except Exception:
             cache_invalidated = 0
         return {
             "ok": True,
-            "file_name": file_name,
-            "chunks": len(chunks),
+            "file_name": safe_name,
+            "deleted_vectors": vectors,
             "cache_invalidated": cache_invalidated,
         }
     except Exception as exc:
@@ -446,6 +603,14 @@ INDEX_HTML = r"""
       border-color: var(--accent);
       font-weight: 650;
     }
+    .danger { color: var(--bad); border-color: #fda29b; }
+    .document-item {
+      display: grid;
+      grid-template-columns: minmax(0,1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .document-item details { min-width: 0; }
     .block { margin-top: 14px; }
     .msg {
       border: 1px solid var(--line);
@@ -519,6 +684,15 @@ INDEX_HTML = r"""
       <div id="answer"></div>
 
       <div class="block">
+        <div class="section-title">上传文档</div>
+        <div class="row">
+          <input id="document-file" type="file" accept=".pdf,.docx,.md,.txt" />
+          <button class="btn primary" id="upload-btn">上传并索引</button>
+        </div>
+        <div id="upload-result" class="muted"></div>
+      </div>
+
+      <div class="block">
         <div class="section-title">快速添加文本到知识库</div>
         <input id="file-name" value="manual-note.md" />
         <textarea id="doc-content" placeholder="粘贴一段 Markdown/TXT 内容，用于快速构建演示知识库。"></textarea>
@@ -569,10 +743,13 @@ INDEX_HTML = r"""
       const docs = data.documents || [];
       setMetric("metric-docs", docs.length);
       document.getElementById("documents").innerHTML = docs.map(doc => `
-        <details>
-          <summary>${escapeHtml(doc.file_name)}</summary>
-          <div class="muted">${escapeHtml(doc.file_type)} · ${doc.chunk_count} chunks · ${escapeHtml(doc.status)}</div>
-        </details>
+        <div class="document-item">
+          <details>
+            <summary>${escapeHtml(doc.file_name)}</summary>
+            <div class="muted">${escapeHtml(doc.file_type)} · ${doc.chunk_count} chunks · ${escapeHtml(doc.status)}</div>
+          </details>
+          <button class="btn danger" data-delete-document="${encodeURIComponent(doc.file_name)}">删除</button>
+        </div>
       `).join("") || "<div class='muted'>暂无文档。</div>";
     }
 
@@ -661,9 +838,47 @@ INDEX_HTML = r"""
       }
     }
 
+    async function uploadDocument() {
+      const input = document.getElementById("document-file");
+      const file = input.files[0];
+      if (!file) return;
+      const box = document.getElementById("upload-result");
+      document.body.classList.add("loading");
+      box.textContent = "上传和索引中...";
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch("/api/index-file", {method: "POST", body: form});
+        const data = await response.json();
+        box.textContent = data.ok ? `已索引 ${data.file_name}，chunks=${data.chunks}` : `上传失败: ${data.error}`;
+        if (data.ok) input.value = "";
+        await loadDocuments();
+      } finally {
+        document.body.classList.remove("loading");
+      }
+    }
+
+    async function deleteDocument(fileName) {
+      if (!confirm(`确认删除 ${fileName}？`)) return;
+      document.body.classList.add("loading");
+      try {
+        const response = await fetch(`/api/documents/${encodeURIComponent(fileName)}`, {method: "DELETE"});
+        const data = await response.json();
+        if (!data.ok) alert(data.error || "删除失败");
+        await loadDocuments();
+      } finally {
+        document.body.classList.remove("loading");
+      }
+    }
+
     askBtn.addEventListener("click", ask);
     healthBtn.addEventListener("click", loadHealth);
     document.getElementById("index-btn").addEventListener("click", indexText);
+    document.getElementById("upload-btn").addEventListener("click", uploadDocument);
+    document.getElementById("documents").addEventListener("click", event => {
+      const button = event.target.closest("[data-delete-document]");
+      if (button) deleteDocument(decodeURIComponent(button.dataset.deleteDocument));
+    });
     queryInput.addEventListener("keydown", event => {
       if (event.key === "Enter") ask();
     });

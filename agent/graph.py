@@ -13,6 +13,7 @@ Agent 决策逻辑:
   3. 用户闲聊 → 直接对话
 """
 
+import re
 from typing import Annotated, List, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -42,16 +43,6 @@ class AgentState(TypedDict):
 # 路由节点
 # ============================================================
 
-ROUTER_PROMPT = """你是一个智能路由器，负责判断用户问题的类型。
-
-请根据用户的问题，选择以下路径之一:
-- "retrieve": 用户询问关于特定知识、文档内容的问题，需要检索知识库
-- "list": 用户想知道知识库中有哪些文档
-- "chat": 用户在进行闲聊、问候、或询问与知识库无关的问题
-
-只回答一个词: retrieve, list, 或 chat。"""
-
-
 def router_node(state: AgentState) -> AgentState:
     """
     路由节点: 判断用户意图并决定后续流程
@@ -61,17 +52,26 @@ def router_node(state: AgentState) -> AgentState:
 
     state["query"] = query
 
-    # 简单关键词判断 + LLM 兜底
-    list_keywords = ["有哪些文档", "文档列表", "知识库有什么", "上传了什么",
-                      "what documents", "list files", "库里有"]
-    if any(kw in query.lower() for kw in list_keywords):
+    normalized = re.sub(r"\s+", " ", str(query).strip().lower())
+
+    list_patterns = [
+        r"(有哪些|有什么|多少|查看|列出|展示).{0,8}(文档|文件)",
+        r"(文档|文件).{0,8}(有哪些|有什么|多少|查看|列出|展示)",
+        r"(文档|文件).{0,8}(列表|清单)",
+        r"(知识库|库里).{0,8}(有哪些|有什么|多少|文档|文件)",
+        r"(系统|知识库|库里).{0,8}(存了|收录).{0,5}(什么|啥|哪些)",
+        r"上传了.{0,5}(什么|哪些)",
+        r"what (documents|files)|list (the )?files|show (the )?(documents|files)",
+    ]
+    if any(re.search(pattern, normalized) for pattern in list_patterns):
         state["route"] = "list"
         return state
 
-    # 如果知识库为空，直接聊天模式
-    chat_keywords = ["你好", "谢谢", "再见", "hello", "hi", "你是谁",
-                      "你能做什么", "帮助", "help"]
-    if any(kw in query.lower() for kw in chat_keywords):
+    chat_phrases = {
+        "你好", "您好", "谢谢", "感谢", "再见", "hello", "hi", "hey",
+        "你是谁", "你能做什么", "介绍一下你自己", "help", "help me",
+    }
+    if normalized.rstrip("!！?？。.") in chat_phrases:
         state["route"] = "chat"
         return state
 

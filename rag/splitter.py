@@ -10,10 +10,12 @@
   版本 3.0: 语义感知分块 (Semantic-aware chunking) → 标题/段落边界 + 相邻片段相似度检测 ← 当前方案
 """
 
+import math
 import re
 from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from models.embedding import get_embedding_model
 from rag.loader import Document
 
 
@@ -26,7 +28,9 @@ class TextSplitter:
         chunk_overlap: int = 50,
         separators: list[str] | None = None,
         strategy: str = "semantic",
-        semantic_threshold: float = 0.12,
+        semantic_threshold: float = 0.55,
+        semantic_embeddings: bool = True,
+        lexical_fallback_threshold: float = 0.12,
     ):
         """
         Args:
@@ -34,12 +38,17 @@ class TextSplitter:
             chunk_overlap: 相邻分块之间的重叠字符数
             separators: 分隔符优先级列表
             strategy: semantic 或 recursive
-            semantic_threshold: 相邻片段词汇相似度低于该值时倾向切分
+            semantic_threshold: 相邻片段 Embedding 余弦相似度低于该值时倾向切分
+            semantic_embeddings: 是否启用 Embedding 语义边界检测
+            lexical_fallback_threshold: Embedding 不可用时的词汇相似度阈值
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.strategy = strategy
         self.semantic_threshold = semantic_threshold
+        self.semantic_embeddings = semantic_embeddings
+        self.lexical_fallback_threshold = lexical_fallback_threshold
+        self._semantic_backend = "not_used"
 
         if separators is None:
             # 中文友好的分隔符：段落 → 句子 → 短句 → 词 → 字符
@@ -103,6 +112,8 @@ class TextSplitter:
             "chunk_overlap": self.chunk_overlap,
             "splitter_type": "SemanticAwareTextSplitter" if self.strategy == "semantic" else "RecursiveCharacterTextSplitter",
             "semantic_threshold": self.semantic_threshold,
+            "semantic_embeddings": self.semantic_embeddings,
+            "semantic_backend": self._semantic_backend,
         }
 
     def _semantic_split_text(self, text: str) -> List[str]:
@@ -116,10 +127,17 @@ class TextSplitter:
         chunks = []
         current = ""
         previous_unit = ""
+        similarities = self._adjacent_similarities(units)
 
-        for unit in units:
+        for index, unit in enumerate(units):
             candidate = f"{current}\n\n{unit}".strip() if current else unit
-            boundary = self._should_start_new_chunk(current, previous_unit, unit)
+            similarity = similarities[index - 1] if index > 0 else None
+            boundary = self._should_start_new_chunk(
+                current,
+                previous_unit,
+                unit,
+                similarity,
+            )
             if current and (len(candidate) > self.chunk_size or boundary):
                 chunks.extend(self._finalize_chunk(current))
                 current = unit
@@ -138,15 +156,49 @@ class TextSplitter:
         sentence_units = re.split(r"(?<=[。！？.!?])\s*", text)
         return [unit.strip() for unit in sentence_units if unit.strip()]
 
-    def _should_start_new_chunk(self, current: str, previous_unit: str, unit: str) -> bool:
+    def _should_start_new_chunk(
+        self,
+        current: str,
+        previous_unit: str,
+        unit: str,
+        similarity: float | None = None,
+    ) -> bool:
         if not current:
             return False
         if self._looks_like_heading(unit):
             return True
         if len(current) < self.chunk_size * 0.45:
             return False
-        similarity = self._jaccard(previous_unit, unit)
-        return similarity < self.semantic_threshold
+        if similarity is not None:
+            return similarity < self.semantic_threshold
+        return self._jaccard(previous_unit, unit) < self.lexical_fallback_threshold
+
+    def _adjacent_similarities(self, units: List[str]) -> List[float | None]:
+        if len(units) < 2:
+            return []
+        if self.semantic_embeddings:
+            try:
+                model = get_embedding_model()
+                embeddings = model.embed_documents(units)
+                if len(embeddings) == len(units):
+                    self._semantic_backend = getattr(model, "model_name", "embedding")
+                    return [
+                        self._cosine(embeddings[index], embeddings[index + 1])
+                        for index in range(len(embeddings) - 1)
+                    ]
+            except Exception:
+                self._semantic_backend = "lexical_fallback"
+
+        self._semantic_backend = "lexical_fallback"
+        return [None] * (len(units) - 1)
+
+    def _cosine(self, left: List[float], right: List[float]) -> float:
+        dot = sum(a * b for a, b in zip(left, right))
+        left_norm = math.sqrt(sum(value * value for value in left))
+        right_norm = math.sqrt(sum(value * value for value in right))
+        if not left_norm or not right_norm:
+            return 0.0
+        return dot / (left_norm * right_norm)
 
     def _looks_like_heading(self, text: str) -> bool:
         stripped = text.strip()
@@ -177,9 +229,13 @@ def create_splitter(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     strategy: str = "semantic",
+    semantic_threshold: float = 0.55,
+    semantic_embeddings: bool = True,
 ) -> TextSplitter:
     return TextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         strategy=strategy,
+        semantic_threshold=semantic_threshold,
+        semantic_embeddings=semantic_embeddings,
     )

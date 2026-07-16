@@ -47,6 +47,29 @@ class DeepSeekLLM:
             response = self._llm.invoke(messages)
         return response.content
 
+    def stream(
+        self,
+        messages: list[BaseMessage],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        """同步流式生成，逐段返回模型实际输出。"""
+        if temperature is not None or max_tokens is not None:
+            llm = ChatOpenAI(
+                model=DEEPSEEK_MODEL,
+                api_key=DEEPSEEK_API_KEY,
+                base_url=DEEPSEEK_BASE_URL,
+                temperature=temperature if temperature is not None else 0.1,
+                max_tokens=max_tokens if max_tokens is not None else 2048,
+            )
+        else:
+            llm = self._llm
+
+        for chunk in llm.stream(messages):
+            content = chunk.content
+            if isinstance(content, str) and content:
+                yield content
+
     async def achat(
         self,
         messages: list[BaseMessage],

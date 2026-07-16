@@ -239,7 +239,8 @@ class MilvusStore:
     def delete_by_file(self, file_name: str) -> int:
         """根据文件名删除向量数据，返回删除条数"""
         collection = self.get_collection()
-        expr = f'file_name == "{file_name}"'
+        escaped = file_name.replace("\\", "\\\\").replace('"', '\\"')
+        expr = f'file_name == "{escaped}"'
         result = collection.delete(expr)
         collection.flush()
         return result.delete_count if hasattr(result, 'delete_count') else 0

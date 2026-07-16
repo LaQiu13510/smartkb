@@ -53,8 +53,22 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "smartkb_collection")
 # ============================================================
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))       # 文档分块大小
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))  # 分块重叠大小
+SPLITTER_STRATEGY = os.getenv("SPLITTER_STRATEGY", "semantic").lower()
+SPLITTER_SEMANTIC_EMBEDDINGS = os.getenv(
+    "SPLITTER_SEMANTIC_EMBEDDINGS",
+    "true",
+).lower() == "true"
+SPLITTER_SEMANTIC_THRESHOLD = float(os.getenv("SPLITTER_SEMANTIC_THRESHOLD", "0.55"))
 TOP_K_RETRIEVAL = int(os.getenv("TOP_K_RETRIEVAL", "5"))  # 检索返回数量
 VECTOR_DIM = int(os.getenv("VECTOR_DIM", "1024"))      # 向量维度 (智谱 embedding-2=1024)
+RERANK_MODE = os.getenv("RERANK_MODE", "lexical").lower()
+RERANK_MODEL = os.getenv(
+    "RERANK_MODEL",
+    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+)
+RAG_CONTEXT_MAX_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "4000"))
+RAG_CONTEXT_MAX_TOKENS = int(os.getenv("RAG_CONTEXT_MAX_TOKENS", "1400"))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
 # ============================================================
 # 缓存配置
